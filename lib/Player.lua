@@ -17,7 +17,6 @@ function Player.new(monitor, speaker)
     -- Peripherals
     self.mon = monitor
     self.spk = speaker
-    self.playing = false
     self.dfpwm_decode = dfpwm.make_decoder()
 
     -- Timing
@@ -33,6 +32,9 @@ function Player.new(monitor, speaker)
     width, height = self.mon.getSize()
     self.text_line = string.rep(" ",width)
     self.fg_line = string.rep("0",width)
+
+    -- Controls
+    self.playing = false
 
     return self
 end
@@ -55,29 +57,39 @@ function Player:connect(url)
     self.ws.send(msg)
 end
 
-function Player:wait_for_ready()
+function Player:wait_for_packet(type)
     while true do
         local event, p1, p2 = os.pullEvent()
         if event == "websocket_message" and p1 == self.url then
             local ok, packet = pcall(textutils.unserialiseJSON, p2)
             if not ok then return end
 
-            if packet.type == "ready" then
-                print("ready")
-                self.ws.send(textutils.serialiseJSON({
-                    type="get_frames"
-                }))
-                self.ws.send(textutils.serialiseJSON({
-                    type="get_audio"
-                }))
-                self.frame_timer = os.startTimer(self.interval)
-                break
+            if packet.type == type then
+                return true
             end
+        elseif (event == "websocket_closed" or event == "websocket_failure") and p1 == self.url then
+            print("Disconnected")
+            return false
         end
     end
 end
 
+function Player:get_media(url)
+    self.ws.send(textutils.serializeJSON({
+        type="get_media",
+        url=url
+    }))
+end
+
 function Player:play()
+    self.ws.send(textutils.serialiseJSON({
+        type="get_frames"
+    }))
+    self.ws.send(textutils.serialiseJSON({
+        type="get_audio"
+    }))
+    self.frame_timer = os.startTimer(self.interval)
+
     local start_time = os.clock()
     local frame_index = 1
 
@@ -98,6 +110,10 @@ function Player:play()
             self:playAudio()
         elseif (event == "websocket_closed" or event == "websocket_failure") and p1 == self.url then
             print("Disconnected")
+            break
+        elseif event == "key" and p1 == keys.c then
+            print("Cancelling playback")
+            self.ws.close()
             break
         end
     end

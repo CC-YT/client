@@ -25,5 +25,12 @@ monitor.setCursorPos(1,1)
 
 local player = Player.new(monitor, speaker)
 player:connect(config.server_url)
-player:wait_for_ready()
-player:play()
+print("Connected")
+print("Enter a youtube URL: ")
+local url = read()
+
+print("Fetching media ... ")
+player:get_media(url)
+if player:wait_for_packet("ready") then
+    player:play()
+end
