@@ -23,6 +23,9 @@ function Player.new(monitor, speaker)
     self.fps = config.fps
     self.interval = 1/self.fps
     self.frame_timer = os.startTimer(self.interval)
+    self.frame_index = 1
+    self.start_time = 0
+    self.audio_time = 0
 
     -- Connection
     self.url = nil
@@ -35,6 +38,7 @@ function Player.new(monitor, speaker)
 
     -- Controls
     self.playing = false
+    self.paused = false
 
     return self
 end
@@ -81,7 +85,7 @@ function Player:get_media(url)
     }))
 end
 
-function Player:play()
+function Player:start()
     self.ws.send(textutils.serialiseJSON({
         type="get_frames"
     }))
@@ -89,33 +93,30 @@ function Player:play()
         type="get_audio"
     }))
     self.frame_timer = os.startTimer(self.interval)
+    self.start_time = os.clock()
+end
 
-    local start_time = os.clock()
-    local frame_index = 1
-
-    while true do
-        local event, p1, p2 = os.pullEvent()
-        if event == "timer" and p1 == self.frame_timer then
-            local targ_time = start_time + (frame_index-1) * self.interval
+-- Maybe implement event hooks in the future if needed
+-- Might be overengineering tho
+function Player:handle_event(event, p1, p2)
+    if event == "timer" and p1 == self.frame_timer then
+        if not self.paused then
             self:drawFrame()
-            frame_index = frame_index + 1
-
-            local now = os.clock()
-            local next_targ = start_time + (frame_index - 1) * self.interval
-            local delay = next_targ - now
-            self.frame_timer = os.startTimer(delay)
-        elseif event == "websocket_message" and p1 == self.url then
-            self:handle_packet(p2)
-        elseif event == "speaker_audio_empty" then
-            self:playAudio()
-        elseif (event == "websocket_closed" or event == "websocket_failure") and p1 == self.url then
-            print("Disconnected")
-            break
-        elseif event == "key" and p1 == keys.c then
-            print("Cancelling playback")
-            self.ws.close()
-            break
         end
+
+        -- Calculate when the next frame needs to be drawn and start a timer for that time
+        local now = os.clock()
+        local next_targ = self.start_time + (self.frame_index - 1) * self.interval
+        local delay = next_targ - now
+
+        self.frame_timer = os.startTimer(delay)
+    elseif event == "websocket_message" and p1 == self.url then
+        self:handle_packet(p2)
+    elseif event == "speaker_audio_empty" then
+        if self.paused then return end
+        self:playAudio()
+    elseif (event == "websocket_closed" or event == "websocket_failure") and p1 == self.url then
+        print("Disconnected")
     end
 end
 
@@ -131,6 +132,8 @@ function Player:handle_packet(raw)
         -- DFPWM audio is sent base64 encoded, so it needs to be decoded
         local decoded = b64.decode(packet.data)
         self.audioQ:push(decoded)
+
+        -- Kickstart audio playback if it isn't started yet
         if not self.playing then
             os.queueEvent("speaker_audio_empty")
             self.playing = true
@@ -145,6 +148,25 @@ function Player:drawFrame()
     local packet = self.frameQ:pop()
     if not packet then return end
 
+    -- FRAME-AUDIO SYNCING --
+    -- Calculate the desync between audio and video playback
+    local video_time = (self.frame_index-1) * self.interval
+    local desync = video_time - self.audio_time
+    local threshold = 0.15 -- 0.15 second threshold before correcting
+
+    if desync > threshold then
+        -- Video is ahead, delay next frame
+        print("video ahead")
+        -- This adds a delay to the frame_timer
+        self.start_time = self.start_time + desync
+    elseif desync < -threshold then
+        -- Video is behind, skip to catch up
+        print("video behind")
+        self.frame_index = self.frame_index + 1
+        return
+    end
+
+    -- Draw frame
     local y = 1
     for line in packet:gmatch("[^\r\n]+") do
         self.mon.setCursorPos(1, y)
@@ -152,6 +174,9 @@ function Player:drawFrame()
         y = y + 1
     end
 
+    self.frame_index = self.frame_index + 1
+
+    -- Request more frames if the queue is about to be empty
     if self.frameQ:count() <= 1 then
         self.ws.send(textutils.serialiseJSON({
             type="get_frames"
@@ -164,6 +189,7 @@ function Player:playAudio()
     if not chunk then return end
 
     local pcm = self.dfpwm_decode(chunk)
+    local duration = #pcm / 48000 -- 48kHz sample rate
     while not self.spk.playAudio(pcm) do
         os.pullEvent("speaker_audio_empty")
     end
@@ -173,6 +199,40 @@ function Player:playAudio()
             type="get_audio"
         }))
     end
+
+    self.audio_time = self.audio_time + duration
+end
+
+-- Player controls
+
+-- Fully stops the video playback without disconnecting
+function Player:stop()
+    self.ws.send(textutils.serialiseJSON({
+        type = "stop"
+    }))
+
+    self.playing = false
+    self.paused = false
+    self.frameQ = Queue.new()
+    self.audioQ = Queue.new()
+    self.frame_index = 1
+    self.audio_time = 0
+    self.start_time = os.clock()
+end
+
+-- Resumes the currently playing video
+function Player:resume()
+    self.paused = false
+    os.queueEvent("speaker_audio_empty")
+end
+
+-- Pauses the currently playing video
+function Player:pause()
+    self.paused = true
+end
+
+function Player:disconnect()
+    self.ws.close()
 end
 
 return Player
