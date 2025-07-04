@@ -69,7 +69,7 @@ function Player:wait_for_packet(type)
             if not ok then return end
 
             if packet.type == type then
-                return true
+                return packet
             end
         elseif (event == "websocket_closed" or event == "websocket_failure") and p1 == self.url then
             print("Disconnected")
@@ -156,12 +156,12 @@ function Player:drawFrame()
 
     if desync > threshold then
         -- Video is ahead, delay next frame
-        print("video ahead")
+        -- print("video ahead")
         -- This adds a delay to the frame_timer
         self.start_time = self.start_time + desync
     elseif desync < -threshold then
         -- Video is behind, skip to catch up
-        print("video behind")
+        -- print("video behind")
         self.frame_index = self.frame_index + 1
         return
     end
@@ -231,8 +231,41 @@ function Player:pause()
     self.paused = true
 end
 
+function Player:seek(time)
+    time = math.max(time,0) -- No negative seek times
+    self.ws.send(textutils.serialiseJSON({
+        type = "seek",
+        time = time
+    }))
+
+    -- Clear queues
+    self.frameQ = Queue.new()
+    self.audioQ = Queue.new()
+
+    -- Adjust timers
+    self.frame_index = math.floor(time * self.fps) + 1
+    self.audio_time = time
+    self.start_time = os.clock() - time
+
+    if self:wait_for_packet("seek_ready") then
+        self.ws.send(textutils.serialiseJSON({
+            type="get_frames"
+        }))
+        self.ws.send(textutils.serialiseJSON({
+            type="get_audio"
+        }))
+    end
+    self.frame_timer = os.startTimer(self.interval)
+    self.playing = false
+end
+
 function Player:disconnect()
     self.ws.close()
+end
+
+-- Getters
+function Player:get_time()
+    return self.audio_time
 end
 
 return Player
